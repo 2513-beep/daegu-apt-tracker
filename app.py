@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import time
+import random
 
 # 웹페이지 기본 설정
 st.set_page_config(page_title="대구 주요 아파트 실시간 시세", layout="wide")
@@ -17,16 +18,38 @@ TARGET_APTS = {
 
 @st.cache_data(ttl=600)  # 10분간 데이터 캐싱 (네이버 차단 방지)
 def fetch_naver_land_data(complex_no):
-    """네이버 부동산 API를 통해 단지별 매물 정보를 가져오는 함수"""
-    url = f"https://new.land.naver.com/api/articles/complex/{complex_no}?realEstateType=APT&tradeType=&page=1&order=prc"
+    """네이버 부동산 API (429 차단 우회: 쿠키 사전 발급 및 접속 지연 적용)"""
+    
+    # 1. 사람처럼 보이도록 임의의 지연 시간 부여 (0.5초 ~ 1.5초)
+    time.sleep(random.uniform(0.5, 1.5))
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": f"https://new.land.naver.com/complexes/{complex_no}"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": f"https://new.land.naver.com/complexes/{complex_no}",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
     }
     
+    # 세션 생성 (쿠키 유지용)
+    session = requests.Session()
+    
     try:
-        response = requests.get(url, headers=headers, timeout=5)
+        # [핵심 1] 단지 메인 페이지에 먼저 접속하여 정상적인 세션 쿠키 발급받기
+        init_url = f"https://new.land.naver.com/complexes/{complex_no}"
+        session.get(init_url, headers=headers, timeout=10)
+        
+        # 쿠키 수령 후 1초 대기
+        time.sleep(1)
+        
+        # [핵심 2] 쿠키가 포함된 세션으로 실제 매물 데이터 API 요청
+        api_url = f"https://new.land.naver.com/api/articles/complex/{complex_no}?realEstateType=APT&tradeType=&page=1&order=prc"
+        response = session.get(api_url, headers=headers, timeout=15)
+        
+        # 만약 여전히 429(차단)가 뜨면 3초 후 1회 재시도
+        if response.status_code == 429:
+            time.sleep(3)
+            response = session.get(api_url, headers=headers, timeout=15)
+            
         if response.status_code == 200:
             data = response.json()
             articles = data.get("articleList", [])
@@ -44,10 +67,18 @@ def fetch_naver_land_data(complex_no):
                     "확인일자": item.get("articleConfirmYmd", "-")
                 })
             return pd.DataFrame(result)
+            
+        elif response.status_code == 429:
+            st.error("🚨 네이버의 임시 요청 제한(429)에 걸렸습니다. 약 1~2분 뒤 다시 [새로고침]을 눌러주세요.")
+            return pd.DataFrame()
+        else:
+            st.warning(f"네이버 응답 실패 (상태 코드: {response.status_code})")
+            return pd.DataFrame()
+            
     except Exception as e:
         st.error(f"데이터를 불러오는 중 오류 발생: {e}")
         return pd.DataFrame()
-
+        
 # --- UI 화면 구성 ---
 st.title("🏢 대구 아파트 실시간 매물 현황")
 st.caption("네이버 부동산 데이터 기반 · 공유용 매물 시세 모니터링")
