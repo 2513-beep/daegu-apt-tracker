@@ -8,77 +8,80 @@ import random
 st.set_page_config(page_title="대구 주요 아파트 실시간 시세", layout="wide")
 
 # 1. 모니터링할 대구 아파트 단지 목록 (아파트명: 단지번호)
-# Step 1에서 찾은 실제 단지번호로 수정해주세요!
 TARGET_APTS = {
     "센트로팰리스": "13620",
     "범어자이르네": "182577",
     "힐스테이트대구역": "128323"
-    # 필요에 따라 10개까지 추가...
+    # 필요에 따라 추가...
 }
 
-@st.cache_data(ttl=600)  # 10분간 데이터 캐싱 (네이버 차단 방지)
+@st.cache_data(ttl=300)  # 5분간 데이터 캐싱
 def fetch_naver_land_data(complex_no):
-    """네이버 부동산 API (429 차단 우회: 쿠키 사전 발급 및 접속 지연 적용)"""
+    """네이버 부동산 모바일 API 기반 수집 (차단 우회 최적화)"""
     
-    # 1. 사람처럼 보이도록 임의의 지연 시간 부여 (0.5초 ~ 1.5초)
-    time.sleep(random.uniform(0.5, 1.5))
+    # 차단 방지를 위한 미세 지연 (0.3 ~ 0.8초)
+    time.sleep(random.uniform(0.3, 0.8))
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Referer": f"https://new.land.naver.com/complexes/{complex_no}",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    # 모바일 전용 API URL 및 파라미터
+    url = "https://m.land.naver.com/cluster/ajax/articleList"
+    
+    params = {
+        "itemId": complex_no,
+        "mapKey": "",
+        "lgeo": complex_no,
+        "showR0": "",
+        "rletTpCd": "APT",
+        "tradTpCd": "A1:B1:B2",  # A1: 매매, B1: 전세, B2: 월세
+        "z": "15",
+        "page": "1"
     }
     
-    # 세션 생성 (쿠키 유지용)
+    # 아이폰 Safari 모바일 브라우저 헤더
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+        "Referer": f"https://m.land.naver.com/complex/info/{complex_no}",
+        "Accept": "*/*",
+        "Accept-Language": "ko-KR,ko;q=0.9"
+    }
+    
     session = requests.Session()
     
     try:
-        # [핵심 1] 단지 메인 페이지에 먼저 접속하여 정상적인 세션 쿠키 발급받기
-        init_url = f"https://new.land.naver.com/complexes/{complex_no}"
-        session.get(init_url, headers=headers, timeout=10)
+        # [1단계] 모바일 단지 페이지 사전 접속하여 세션 쿠키 수령
+        session.get(f"https://m.land.naver.com/complex/info/{complex_no}", headers=headers, timeout=10)
+        time.sleep(0.5)
         
-        # 쿠키 수령 후 1초 대기
-        time.sleep(1)
+        # [2단계] 실제 데이터 요청
+        response = session.get(url, headers=headers, params=params, timeout=10)
         
-        # [핵심 2] 쿠키가 포함된 세션으로 실제 매물 데이터 API 요청
-        api_url = f"https://new.land.naver.com/api/articles/complex/{complex_no}?realEstateType=APT&tradeType=&page=1&order=prc"
-        response = session.get(api_url, headers=headers, timeout=15)
-        
-        # 만약 여전히 429(차단)가 뜨면 3초 후 1회 재시도
-        if response.status_code == 429:
-            time.sleep(3)
-            response = session.get(api_url, headers=headers, timeout=15)
-            
         if response.status_code == 200:
             data = response.json()
-            articles = data.get("articleList", [])
+            articles = data.get("body", [])
+            
+            if not articles:
+                articles = data.get("articleList", [])
             
             result = []
             for item in articles:
                 result.append({
-                    "동": item.get("buildingName", "-"),
-                    "거래방식": item.get("tradeTypeName", "-"),
-                    "가격": item.get("dealOrWarrantPrc", "-"),
-                    "층수": item.get("floorInfo", "-"),
-                    "전용면적(㎡)": item.get("area2", "-"),
+                    "동": item.get("bldgNm", item.get("buildingName", "-")),
+                    "거래방식": item.get("tradTpNm", item.get("tradeTypeName", "-")),
+                    "가격": item.get("prc", item.get("dealOrWarrantPrc", "-")),
+                    "층수": item.get("flrInfo", item.get("floorInfo", "-")),
+                    "전용면적(㎡)": item.get("spc2", item.get("area2", "-")),
                     "방향": item.get("direction", "-"),
-                    "매물특징": item.get("articleFeatureDesc", "-"),
-                    "확인일자": item.get("articleConfirmYmd", "-")
+                    "매물특징": item.get("atclFctrDesc", item.get("articleFeatureDesc", "-")),
+                    "확인일자": item.get("confirmYmd", item.get("articleConfirmYmd", "-"))
                 })
             return pd.DataFrame(result)
-            
-        elif response.status_code == 429:
-            st.error("🚨 네이버의 임시 요청 제한(429)에 걸렸습니다. 약 1~2분 뒤 다시 [새로고침]을 눌러주세요.")
-            return pd.DataFrame()
         else:
-            st.warning(f"네이버 응답 실패 (상태 코드: {response.status_code})")
+            st.error(f"응답 실패 (상태 코드: {response.status_code})")
             return pd.DataFrame()
             
     except Exception as e:
-        st.error(f"데이터를 불러오는 중 오류 발생: {e}")
+        st.error(f"데이터 수집 중 오류: {e}")
         return pd.DataFrame()
-        
+
 # --- UI 화면 구성 ---
 st.title("🏢 대구 아파트 실시간 매물 현황")
 st.caption("네이버 부동산 데이터 기반 · 공유용 매물 시세 모니터링")
@@ -124,7 +127,7 @@ if not df.empty:
         use_container_width=True,
         hide_index=True,
         column_config={
-            "가격": st.column_config.TextColumn("매물가", help="억 원 단위"),
+            "가격": st.column_config.TextColumn("매물가"),
             "매물특징": st.column_config.TextColumn("특징", width="large")
         }
     )
